@@ -27,6 +27,8 @@ if (Test-Path -LiteralPath $source) {
     Get-Process -Name "handclip-agent" -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Milliseconds 500
     Copy-Item -LiteralPath $source -Destination $binary -Force
+    # Clear the downloaded-file mark so Windows starts it without a SmartScreen prompt.
+    Unblock-File -LiteralPath $binary
 }
 if (-not (Test-Path -LiteralPath $binary)) {
     throw "Put handclip-agent.exe next to this script: $source"

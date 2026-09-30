@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: cargo test --workspace --locked
+      - run: packaging/macos/package.sh
+        env:
+          HANDCLIP_TARGETS: aarch64-apple-darwin x86_64-apple-darwin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: target/dist/Handclip-macos.zip
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release --locked -p handclip-agent
+      - shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/Handclip | Out-Null
+          Copy-Item target/release/handclip-agent.exe, packaging/windows/install-agent.ps1 dist/Handclip/
+          Compress-Archive -Path dist/Handclip -DestinationPath dist/Handclip-windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/Handclip-windows.zip
+
+  release:
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - run: >
+          gh release create "$GITHUB_REF_NAME"
+          Handclip-macos.zip Handclip-windows.zip
+          --repo "$GITHUB_REPOSITORY"
+          --title "Handclip $GITHUB_REF_NAME"
+          --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

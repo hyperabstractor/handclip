@@ -83,6 +83,7 @@ launchctl bootstrap "gui/$uid" "$plist" 2>/dev/null \
     || { sleep 2 && launchctl bootstrap "gui/$uid" "$plist"; }
 
 cp "$here/handclip-cli" "$data/bin/handclip-cli"
+xattr -d com.apple.quarantine "$data/bin/handclip-cli" 2>/dev/null || true
 linked=false
 for dir in /usr/local/bin "$HOME/.local/bin"; do
     if [ -d "$dir" ] && [ -w "$dir" ]; then

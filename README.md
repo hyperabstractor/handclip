@@ -18,23 +18,39 @@ the relay port (24871) to the internet.
 
 ## Install
 
+Download the latest `Handclip-macos.zip` or `Handclip-windows.zip` from
+[Releases](https://github.com/hyperabstractor/handclip/releases).
+
 ### macOS
 
-Build the installer bundle on a Mac with a Rust toolchain:
+Unzip `Handclip-macos.zip` and run the installer from Terminal:
 
 ```sh
-packaging/macos/package.sh
+cd ~/Downloads/Handclip && ./install.sh
 ```
 
-Copy `target/dist/Handclip-macos.zip` to each Mac, unzip it, and run
-`./install.sh`. It installs `Handclip.app` in `/Applications`, starts it at every
-login, and links `handclip-cli` into your PATH. Re-run it to upgrade.
+It installs `Handclip.app` in `/Applications`, starts it at every login, and
+links `handclip-cli` into your PATH. Re-run it to upgrade. The app isn't
+notarized by Apple, so use the installer rather than opening `Handclip.app`
+directly from the download. It runs on Apple silicon and Intel Macs.
 
 ### Windows
 
-Build `handclip-agent.exe` with `cargo build --release -p handclip-agent`, put it
-next to `packaging/windows/install-agent.ps1`, and run the script. It installs
-the agent for the current user and starts it at every sign-in.
+Unzip `Handclip-windows.zip` and run the installer from PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Handclip\install-agent.ps1
+```
+
+It installs the agent for the current user and starts it at every sign-in.
+
+### Building from source
+
+With a Rust toolchain, `packaging/macos/package.sh` builds
+`target/dist/Handclip-macos.zip`. On Windows, build with
+`cargo build --release -p handclip-agent` and put `handclip-agent.exe` next to
+`packaging/windows/install-agent.ps1`. Pushing a `v*` tag builds both zips and
+publishes a GitHub release.
 
 ### First launch
 
