@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Handclip Settings</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f4f7fb;
+      --card: rgba(255, 255, 255, .86);
+      --text: #14213a;
+      --muted: #61708a;
+      --line: #dce4ef;
+      --accent: #2c5fa8;
+      --accent-hover: #234e8b;
+      --good: #15966b;
+      --warn: #d27a22;
+      --shadow: 0 18px 50px rgba(28, 48, 79, .10);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #101622;
+        --card: rgba(27, 36, 52, .92);
+        --text: #eef4ff;
+        --muted: #9dacbf;
+        --line: #354157;
+        --accent: #75a9ee;
+        --accent-hover: #91bcf4;
+        --good: #48d5a3;
+        --warn: #f0a35a;
+        --shadow: 0 18px 50px rgba(0, 0, 0, .28);
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 10% -10%, rgba(53, 111, 190, .18), transparent 42%),
+        var(--bg);
+      font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { max-width: 760px; margin: 0 auto; padding: 34px 34px 42px; }
+    header { display: flex; align-items: center; gap: 15px; margin-bottom: 24px; }
+    .mark {
+      width: 48px; height: 48px; border-radius: 15px;
+      display: grid; place-items: center;
+      color: white; font-size: 21px; font-weight: 750; letter-spacing: -.05em;
+      background: linear-gradient(145deg, #356fbe, #244d87);
+      box-shadow: 0 10px 24px rgba(44, 95, 168, .28);
+    }
+    h1 { margin: 0; font-size: 25px; letter-spacing: -.025em; }
+    .subtitle { color: var(--muted); margin-top: 2px; }
+    .status {
+      margin-left: auto; padding: 7px 11px; border-radius: 999px;
+      font-size: 12px; font-weight: 650;
+      color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent);
+    }
+    .status.connected {
+      color: var(--good); background: color-mix(in srgb, var(--good) 12%, transparent);
+    }
+    .card {
+      background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+      padding: 20px; margin-bottom: 16px; box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+    h2 { font-size: 15px; margin: 0 0 16px; letter-spacing: -.01em; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+    .wide { grid-column: 1 / -1; }
+    label { display: block; font-size: 12px; font-weight: 650; margin: 0 0 6px; }
+    input, textarea {
+      width: 100%; color: var(--text); background: color-mix(in srgb, var(--card) 82%, var(--bg));
+      border: 1px solid var(--line); border-radius: 9px; padding: 10px 11px;
+      font: 13px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+      outline: none; transition: border-color .15s, box-shadow .15s;
+    }
+    input:focus, textarea:focus {
+      border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+    }
+    input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
+    textarea { min-height: 104px; resize: vertical; }
+    .help { color: var(--muted); font-size: 11px; margin-top: 6px; }
+    .activity {
+      display: flex; justify-content: space-between; gap: 16px;
+      color: var(--muted); font-size: 12px;
+    }
+    .toggle { display: flex; align-items: center; gap: 9px; margin: 2px 0 0; font-size: 13px; }
+    .shortcut-list { display: grid; gap: 10px; }
+    .shortcut-row {
+      display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) 84px;
+      align-items: center; gap: 10px;
+    }
+    .shortcut-device {
+      color: var(--muted); font-size: 12px; font-weight: 700;
+      text-transform: none;
+    }
+    .inline { display: flex; gap: 8px; }
+    .inline input { flex: 1; }
+    footer { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 22px; }
+    #message { margin-right: auto; color: var(--muted); font-size: 12px; }
+    button {
+      border: 0; border-radius: 9px; padding: 10px 15px;
+      font: 650 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      cursor: pointer;
+    }
+    .secondary { color: var(--text); background: transparent; border: 1px solid var(--line); }
+    .primary { color: white; background: var(--accent); }
+    .primary:hover { background: var(--accent-hover); }
+    button:disabled { opacity: .55; cursor: default; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="mark">H</div>
+      <div>
+        <h1>Handclip</h1>
+        <div class="subtitle">Private clipboard sync for your devices</div>
+      </div>
+      <div id="status" class="status">Connecting…</div>
+    </header>
+
+    <section class="card">
+      <h2>Network</h2>
+      <div class="grid">
+        <div>
+          <label for="device">Device ID</label>
+          <input id="device" autocomplete="off" spellcheck="false">
+          <div class="help">Stable name shown in transfer activity.</div>
+        </div>
+        <div>
+          <label for="token">Authentication token file</label>
+          <input id="token" autocomplete="off" spellcheck="false">
+          <div class="help">The token stays in this local file.</div>
+        </div>
+        <div class="wide">
+          <label for="tokenValue">Shared token</label>
+          <div class="inline">
+            <input id="tokenValue" type="password" autocomplete="off" spellcheck="false">
+            <button class="secondary" id="generateToken" type="button">Generate</button>
+          </div>
+          <div class="help">Every device uses the same token. Generate it once on the first device, then paste it on the others.</div>
+        </div>
+        <div class="wide">
+          <label for="endpoints">Relay endpoints, in priority order</label>
+          <textarea id="endpoints" autocomplete="off" spellcheck="false"></textarea>
+          <div class="help">One host:port per line. Handclip tries the first address, then each fallback.</div>
+        </div>
+        <div class="wide">
+          <label class="toggle">
+            <input id="runRelay" type="checkbox">
+            Run the relay on this device (port 24871)
+          </label>
+          <div class="help">Enable on exactly one always-on device. Other devices list its address above.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Clipboard</h2>
+      <div class="grid">
+        <div class="wide">
+          <label>Send-to shortcuts</label>
+          <div class="shortcut-row help" style="margin: 0 0 6px">
+            <span>Device ID</span><span>Shortcut</span><span></span>
+          </div>
+          <div id="targetShortcuts" class="shortcut-list"></div>
+          <div class="shortcut-row" style="margin-top: 10px">
+            <span class="shortcut-device">All devices</span>
+            <input id="broadcastShortcut" aria-label="All devices shortcut" autocomplete="off" spellcheck="false">
+            <button class="secondary" id="addTarget" type="button">Add</button>
+          </div>
+          <div id="shortcutHelp" class="help"></div>
+        </div>
+        <div class="wide">
+          <label for="received">Received-files directory</label>
+          <input id="received" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="wide">
+          <label for="logs">Log directory</label>
+          <input id="logs" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="wide">
+          <label class="toggle">
+            <input id="notifications" type="checkbox">
+            Show notifications when a clipboard is sent or received
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <section class="card activity">
+      <span id="platform"></span>
+      <span id="lastActivity">No clipboard activity yet</span>
+    </section>
+
+    <footer>
+      <span id="message">Changes restart Handclip automatically.</span>
+      <button class="secondary" id="cancel">Cancel</button>
+      <button class="primary" id="save">Save &amp; Restart</button>
+    </footer>
+  </main>
+
+  <script>
+    const $ = id => document.getElementById(id);
+
+    function textInput(className, value, label) {
+      const input = document.createElement("input");
+      input.className = className;
+      input.value = value;
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.setAttribute("aria-label", label);
+      return input;
+    }
+
+    function addTargetRow(target) {
+      const row = document.createElement("div");
+      row.className = "shortcut-row target-row";
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "secondary";
+      remove.textContent = "Remove";
+      remove.addEventListener("click", () => row.remove());
+      row.append(
+        textInput("target-device", target.device_id, "Device ID"),
+        textInput("target-shortcut", target.shortcut, "Shortcut"),
+        remove
+      );
+      $("targetShortcuts").append(row);
+      return row;
+    }
+
+    function nextFreeShortcut() {
+      const used = new Set(
+        [...document.querySelectorAll(".target-shortcut"), $("broadcastShortcut")]
+          .map(input => input.value.trim())
+      );
+      for (let n = 1; n <= 9; n++) {
+        if (!used.has(`Control+Alt+${n}`)) return `Control+Alt+${n}`;
+      }
+      return "";
+    }
+
+    function renderTargetShortcuts(targets) {
+      $("targetShortcuts").replaceChildren();
+      targets.forEach(addTargetRow);
+    }
+
+    function renderRuntime(status) {
+      const badge = $("status");
+      badge.textContent = status.summary;
+      badge.classList.toggle("connected", status.connected);
+      $("lastActivity").textContent = status.last_activity;
+    }
+
+    window.handclipLoad = model => {
+      const c = model.config;
+      $("device").value = c.device_id;
+      $("endpoints").value = c.relay_endpoints.join("\n");
+      $("token").value = c.token_file;
+      $("tokenValue").value = "";
+      $("tokenValue").type = "password";
+      $("tokenValue").placeholder = model.token_saved
+        ? "Saved — leave blank to keep it"
+        : "Paste the token from another device, or Generate";
+      $("received").value = c.receive_dir;
+      $("logs").value = c.log_dir;
+      renderTargetShortcuts(c.target_shortcuts);
+      $("broadcastShortcut").value = c.broadcast_shortcut;
+      $("notifications").checked = c.notifications;
+      $("runRelay").checked = c.run_relay;
+      $("shortcutHelp").textContent = model.shortcut_help;
+      $("platform").textContent = model.platform + " agent";
+      renderRuntime(model.status);
+    };
+
+    window.handclipRuntime = renderRuntime;
+    window.handclipSaveResult = (ok, message) => {
+      $("message").textContent = message;
+      $("save").disabled = false;
+      if (!ok) $("message").style.color = "var(--warn)";
+    };
+
+    document.addEventListener("DOMContentLoaded", () => {
+      window.handclipLoad(window.__HANDCLIP_MODEL__);
+      $("addTarget").addEventListener("click", () => {
+        addTargetRow({ device_id: "", shortcut: nextFreeShortcut() })
+          .querySelector(".target-device").focus();
+      });
+      $("generateToken").addEventListener("click", () => {
+        const bytes = crypto.getRandomValues(new Uint8Array(32));
+        const field = $("tokenValue");
+        field.value = Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+        field.type = "text";
+        field.select();
+      });
+      $("cancel").addEventListener("click", () => {
+        window.ipc.postMessage(JSON.stringify({ action: "close_settings" }));
+        window.close();
+      });
+      $("save").addEventListener("click", () => {
+        $("save").disabled = true;
+        $("message").style.color = "";
+        $("message").textContent = "Validating settings…";
+        const relayEndpoints = $("endpoints").value
+          .split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+        const targetShortcuts = Array.from(document.querySelectorAll(".target-row"))
+          .map(row => ({
+            device_id: row.querySelector(".target-device").value.trim(),
+            shortcut: row.querySelector(".target-shortcut").value.trim()
+          }))
+          .filter(target => target.device_id || target.shortcut);
+        window.ipc.postMessage(JSON.stringify({
+          action: "save",
+          token: $("tokenValue").value.trim(),
+          config: {
+            device_id: $("device").value.trim(),
+            relay_endpoints: relayEndpoints,
+            token_file: $("token").value.trim(),
+            receive_dir: $("received").value.trim(),
+            log_dir: $("logs").value.trim(),
+            target_shortcuts: targetShortcuts,
+            broadcast_shortcut: $("broadcastShortcut").value.trim(),
+            notifications: $("notifications").checked,
+            run_relay: $("runRelay").checked
+          }
+        }));
+      });
+    });
+  </script>
+</body>
+</html>

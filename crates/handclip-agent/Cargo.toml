@@ -1,0 +1,30 @@
+[package]
+name = "handclip-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+arboard.workspace = true
+base64.workspace = true
+clap.workspace = true
+handclip-core = { path = "../handclip-core" }
+handclip-relay = { path = "../handclip-relay" }
+global-hotkey.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tao.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+tray-icon.workspace = true
+uuid.workspace = true
+wry.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+notify-rust.workspace = true
