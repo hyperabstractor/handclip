@@ -15,6 +15,8 @@ pub struct AppConfig {
     pub relay_endpoints: Vec<String>,
     pub token_file: PathBuf,
     pub receive_dir: PathBuf,
+    #[serde(default = "default_download_dir")]
+    pub download_dir: PathBuf,
     pub log_dir: PathBuf,
     #[serde(default)]
     pub target_shortcuts: Vec<TargetShortcut>,
@@ -51,6 +53,7 @@ impl AppConfig {
             relay_endpoints: Vec::new(),
             token_file: default_token_file(),
             receive_dir: default_receive_dir(),
+            download_dir: default_download_dir(),
             log_dir: default_log_dir(),
             target_shortcuts: Vec::new(),
             broadcast_shortcut: default_broadcast_shortcut(),
@@ -82,6 +85,7 @@ impl AppConfig {
             relay_endpoints,
             token_file: overrides.token_file.unwrap_or_else(default_token_file),
             receive_dir: overrides.receive_dir.unwrap_or_else(default_receive_dir),
+            download_dir: default_download_dir(),
             log_dir: overrides.log_dir.unwrap_or_else(default_log_dir),
             target_shortcuts: Vec::new(),
             broadcast_shortcut: overrides
@@ -109,6 +113,9 @@ impl AppConfig {
         }
         if self.receive_dir.as_os_str().is_empty() {
             bail!("received-files directory must not be empty");
+        }
+        if self.download_dir.as_os_str().is_empty() {
+            bail!("saved-files directory must not be empty");
         }
         if self.log_dir.as_os_str().is_empty() {
             bail!("log directory must not be empty");
@@ -212,6 +219,14 @@ pub fn default_token_file() -> PathBuf {
     platform_data_dir().join("token")
 }
 
+pub fn default_download_dir() -> PathBuf {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+    home.map(PathBuf::from)
+        .unwrap_or_else(platform_data_dir)
+        .join("Downloads")
+        .join("Handclip")
+}
+
 pub fn default_receive_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     if let Some(home) = std::env::var_os("HOME") {
@@ -299,6 +314,7 @@ mod tests {
             ],
             token_file: PathBuf::from("/tmp/token"),
             receive_dir: PathBuf::from("/tmp/received"),
+            download_dir: PathBuf::from("/tmp/downloads"),
             log_dir: PathBuf::from("/tmp/logs"),
             target_shortcuts: vec![TargetShortcut {
                 device_id: "desktop".into(),
@@ -308,6 +324,18 @@ mod tests {
             notifications: true,
             run_relay: false,
         }
+    }
+
+    #[test]
+    fn existing_settings_gain_a_durable_download_directory() {
+        let original = valid_config();
+        let mut json = serde_json::to_value(&original).unwrap();
+        json.as_object_mut().unwrap().remove("download_dir");
+        let migrated: AppConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(migrated.download_dir, default_download_dir());
+        assert_eq!(migrated.receive_dir, original.receive_dir);
+        assert_eq!(migrated.relay_endpoints, original.relay_endpoints);
+        assert_eq!(migrated.target_shortcuts, original.target_shortcuts);
     }
 
     #[test]

@@ -1,13 +1,14 @@
 # Handclip
 
-Handclip is a private, cross-platform clipboard bus for your own Macs and Windows
+Handclip shares files and clipboard content between your own Macs and Windows
 PCs. One always-on device runs a small relay; every device keeps an outbound,
 full-duplex connection to it.
 
-Copy normally, then press a shortcut to send the clipboard to a specific device
-(or to all of them). Text, images, files, and folders are supported. File
-contents are streamed in bounded chunks, verified with SHA-256 on each receiver,
-and staged locally before Finder or Explorer receives the new file clipboard.
+The menu bar / system tray and keyboard shortcuts send the clipboard:
+copy normally, then choose **Send Clipboard to…**. Text, images, files, and
+folders remain supported. File contents are streamed in bounded chunks and
+verified with SHA-256 before becoming visible. A sender's **Files delivered**
+notification requires confirmation from the receiver after verification.
 
 ## Security
 
@@ -52,6 +53,16 @@ With a Rust toolchain, `packaging/macos/package.sh` builds
 `packaging/windows/install-agent.ps1`. Pushing a `v*` tag builds both zips and
 publishes a GitHub release.
 
+### Upgrading to 0.2
+
+Upgrade the relay and **every device** together. This release uses protocol 4;
+protocol 3 peers are rejected. Existing device IDs, tokens, endpoints,
+and shortcuts are preserved.
+
+Version 0.2.1 removes the experimental Finder Share extension. The macOS installer
+unregisters and disables the old extension when upgrading. Clipboard sending and
+the large-file transfer improvements remain available.
+
 ### First launch
 
 On a new install Handclip opens its Settings window:
@@ -68,6 +79,14 @@ On a new install Handclip opens its Settings window:
 
 Save, and Handclip restarts with the new settings.
 
+For local and remote use, list the **same relay's** LAN address first and Tailscale
+IP or MagicDNS hostname second, e.g. `192.168.1.10:24871` followed by
+`relay.your-tailnet.ts.net:24871`. Handclip tries them in order on connection and
+reconnection. It keeps a healthy connection until it disconnects; it does not
+perform LAN discovery or switch routes during an active transfer. Tailscale is
+not required when the LAN endpoint is reachable. Allow TCP 24871 on the relay's
+local/private network firewall.
+
 ## Using Handclip
 
 The Handclip icon in the macOS menu bar or Windows system tray shows the
@@ -78,11 +97,22 @@ connection status and last clipboard activity, and provides:
 - Open Received Files and Open Logs
 - Restart and Quit
 
-Only the selected recipient's clipboard changes. If a target is offline, the
-sender reports that nothing was delivered. Received files are stored in:
+Sends update the selected recipient's clipboard. If a target is offline, the
+sender reports that nothing was delivered. Clipboard file transfers are staged in:
 
 - macOS: `~/Library/Caches/Handclip/received`
 - Windows: `%LOCALAPPDATA%\Handclip\received`
+
+**Open Received Files** opens this clipboard staging directory. Each transfer gets its
+own subfolder, avoiding overwrites. Failed integrity checks leave files hidden
+in a partial staging directory.
+
+Large transfers use bounded per-connection queues with backpressure, independent
+socket reads/writes, and cancellation-safe framing. This avoids dropping chunks
+when a slower receiver falls behind. Transfer resumption across a receiver or
+relay restart is not implemented: retry an interrupted transfer. Do not treat a
+queued request or relay acknowledgement as successful delivery; wait for the
+receiver's confirmation.
 
 File and folder names must be portable across macOS and Windows. Symlinks are
 rejected instead of being followed.

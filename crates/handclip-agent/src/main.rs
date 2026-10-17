@@ -21,11 +21,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use arboard::Clipboard;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use clap::Parser;
-use handclip_core::{
-    ClientMessage, ClipboardContent, ClipboardEvent, DeliveryTarget, PROTOCOL_VERSION,
-    ServerMessage, read_frame, resolve_auth_token, write_frame,
-};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
+use handclip_core::{
+    ClientMessage, ClipboardContent, ClipboardEvent, DeliveryTarget, FileDelivery, FrameReader,
+    PROTOCOL_VERSION, ServerMessage, read_frame, resolve_auth_token, write_frame,
+};
 use image::{ColorType, ImageEncoder, ImageFormat, codecs::png::PngEncoder};
 use tao::{
     event::{Event, StartCause},
@@ -249,8 +249,10 @@ fn run(args: Args, mut app_config: AppConfig, config_path: PathBuf) -> Result<()
     }
 
     let mut clipboard = Clipboard::new().context("failed to open the system clipboard")?;
-    let mut incoming_transfers =
-        file_transfer::IncomingTransfers::new(app_config.receive_dir.clone())?;
+    let mut incoming_transfers = file_transfer::IncomingTransfers::new(
+        app_config.receive_dir.clone(),
+        app_config.download_dir.clone(),
+    )?;
     let (network_tx, network_rx) = channel(NETWORK_COMMAND_CAPACITY);
     let (ui_tx, ui_rx) = mpsc::sync_channel(UI_EVENT_CAPACITY);
 
@@ -260,7 +262,7 @@ fn run(args: Args, mut app_config: AppConfig, config_path: PathBuf) -> Result<()
             app_config.device_id.clone(),
             token,
             network_rx,
-            ui_tx,
+            ui_tx.clone(),
         )?;
     } else {
         // Not set up: make shares fail fast instead of queueing forever.
@@ -479,45 +481,94 @@ fn run(args: Args, mut app_config: AppConfig, config_path: PathBuf) -> Result<()
                                 }
                             }
                         }
+                        ClipboardContent::FilesReceived {
+                            transfer_id,
+                            item_count,
+                            delivery,
+                        } => {
+                            let activity = format!(
+                                "{} file item(s) {} on {}",
+                                item_count,
+                                if delivery == FileDelivery::Save {
+                                    "saved"
+                                } else {
+                                    "received"
+                                },
+                                event.origin
+                            );
+                            info!(%transfer_id, %activity, "receiver confirmed file transfer");
+                            if let Some(ui) = &mut desktop_ui {
+                                ui.set_activity(activity.clone());
+                            }
+                            if app_config.notifications {
+                                notify_user("Files delivered", &activity);
+                            }
+                        }
                         content @ (ClipboardContent::FilesStart { .. }
                         | ClipboardContent::FileChunk { .. }
                         | ClipboardContent::FilesComplete { .. }) => {
                             match incoming_transfers.handle(&event.origin, content) {
-                                Ok(Some(paths)) => {
-                                    if let Err(error) = clipboard.set().file_list(&paths) {
-                                        error!(
-                                            %error,
-                                            sequence,
-                                            origin = %event.origin,
-                                            "failed to set clipboard files"
+                                Ok(Some(received)) => {
+                                    let paths = &received.paths;
+                                    if received.delivery == FileDelivery::Clipboard {
+                                        if let Err(error) = clipboard.set().file_list(paths) {
+                                            error!(%error, "failed to set clipboard files");
+                                            continue;
+                                        }
+                                    }
+                                    let receipt = ClipboardEvent::new(
+                                        &device_id,
+                                        ClipboardContent::FilesReceived {
+                                            transfer_id: received.transfer_id,
+                                            item_count: paths.len(),
+                                            delivery: received.delivery,
+                                        },
+                                    );
+                                    let receipt_tx = network_tx.clone();
+                                    let receipt_target = DeliveryTarget::device(&event.origin);
+                                    let _ = thread::Builder::new()
+                                        .name("handclip-receipt".into())
+                                        .spawn(move || {
+                                            if let Err(error) =
+                                                receipt_tx.blocking_send(NetworkCommand::Publish {
+                                                    target: receipt_target,
+                                                    event: receipt,
+                                                })
+                                            {
+                                                warn!(%error, "could not queue transfer receipt");
+                                            }
+                                        });
+                                    let saved = received.delivery == FileDelivery::Save;
+                                    let activity = format!(
+                                        "{} {} file item(s) from {}",
+                                        if saved { "Saved" } else { "Received" },
+                                        paths.len(),
+                                        event.origin
+                                    );
+                                    info!(sequence, origin = %event.origin, %activity);
+                                    if let Some(ui) = &mut desktop_ui {
+                                        ui.set_activity(activity.clone());
+                                    }
+                                    if app_config.notifications {
+                                        let body = if saved {
+                                            format!(
+                                                "{activity} in {}",
+                                                app_config.download_dir.display()
+                                            )
+                                        } else {
+                                            activity
+                                        };
+                                        notify_user(
+                                            if saved {
+                                                "Files received"
+                                            } else {
+                                                "Clipboard received"
+                                            },
+                                            &body,
                                         );
-                                    } else {
-                                        info!(
-                                            sequence,
-                                            origin = %event.origin,
-                                            count = paths.len(),
-                                            "remote files copied locally"
-                                        );
-                                        if let Some(ui) = &mut desktop_ui {
-                                            ui.set_activity(format!(
-                                                "Received {} file item(s) from {}",
-                                                paths.len(),
-                                                event.origin
-                                            ));
-                                        }
-                                        if app_config.notifications {
-                                            notify_user(
-                                                "Clipboard received",
-                                                &format!(
-                                                    "{} file item(s) from {}",
-                                                    paths.len(),
-                                                    event.origin
-                                                ),
-                                            );
-                                        }
-                                        if exit_after_receive {
-                                            *control_flow = ControlFlow::Exit;
-                                        }
+                                    }
+                                    if exit_after_receive {
+                                        *control_flow = ControlFlow::Exit;
                                     }
                                 }
                                 Ok(None) => {}
@@ -526,8 +577,20 @@ fn run(args: Args, mut app_config: AppConfig, config_path: PathBuf) -> Result<()
                                         %error,
                                         sequence,
                                         origin = %event.origin,
-                                        "failed to receive clipboard files"
+                                        "failed to receive files"
                                     );
+                                    if let Some(ui) = &mut desktop_ui {
+                                        ui.set_activity(format!(
+                                            "File transfer from {} failed: {error}",
+                                            event.origin
+                                        ));
+                                    }
+                                    if app_config.notifications {
+                                        notify_user(
+                                            "File transfer failed",
+                                            &format!("From {}: {error}", event.origin),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -674,7 +737,7 @@ fn publish_clipboard_files(
         .name("handclip-file-sender".into())
         .spawn(move || {
             info!(count = paths.len(), "preparing clipboard files");
-            match file_transfer::stream_paths(paths, &device_id, |event| {
+            match file_transfer::stream_paths(paths, &device_id, FileDelivery::Clipboard, |event| {
                 network_tx
                     .blocking_send(NetworkCommand::Publish {
                         target: target.clone(),
@@ -895,15 +958,10 @@ async fn network_loop(
             Ok(connection) => connection,
             Err(error) => {
                 let _ = ui_tx.send(UiEvent::Disconnected(format!("{error:#}")));
-                tokio::select! {
-                    _ = sleep(RECONNECT_DELAY) => {}
-                    command = command_rx.recv() => {
-                        let Some(command @ NetworkCommand::Publish { .. }) = command else {
-                            return;
-                        };
-                        pending.push_back(command);
-                    }
+                if command_rx.is_closed() {
+                    return;
                 }
+                sleep(RECONNECT_DELAY).await;
                 continue;
             }
         };
@@ -979,7 +1037,7 @@ async fn connect(endpoint: &str, device_id: &str, token: &str) -> Result<TcpStre
 }
 
 async fn connected_session(
-    mut reader: tokio::net::tcp::OwnedReadHalf,
+    reader: tokio::net::tcp::OwnedReadHalf,
     mut writer: tokio::net::tcp::OwnedWriteHalf,
     device_id: &str,
     command_rx: &mut Receiver<NetworkCommand>,
@@ -987,38 +1045,43 @@ async fn connected_session(
     pending: &mut VecDeque<NetworkCommand>,
 ) -> Result<()> {
     let mut outstanding = VecDeque::new();
+    let mut reader = FrameReader::new(reader);
+    let (write_tx, mut write_rx) = channel(8);
+    let mut writer_task = tokio::spawn(async move {
+        while let Some(message) = write_rx.recv().await {
+            write_frame(&mut writer, &message).await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
     let result = async {
         while let Some(command) = pending.pop_front() {
             let NetworkCommand::Publish { target, event } = &command;
             outstanding.push_back(command.clone());
-            write_frame(
-                &mut writer,
-                &ClientMessage::Publish {
+            write_tx.send(ClientMessage::Publish {
                     target: target.clone(),
                     event: event.clone(),
-                },
+                }
             )
             .await?;
         }
 
         loop {
             tokio::select! {
-                command = command_rx.recv() => {
+                result = &mut writer_task => { return result.context("network writer stopped")?; }
+                command = command_rx.recv(), if outstanding.len() < 8 => {
                     let Some(command @ NetworkCommand::Publish { .. }) = command else {
                         return Ok(());
                     };
                     let NetworkCommand::Publish { target, event } = &command;
                     outstanding.push_back(command.clone());
-                    write_frame(
-                        &mut writer,
-                        &ClientMessage::Publish {
+                    write_tx.send(ClientMessage::Publish {
                             target: target.clone(),
                             event: event.clone(),
-                        },
+                        }
                     )
                     .await?;
                 }
-                message = read_frame::<_, ServerMessage>(&mut reader) => {
+                message = reader.next::<ServerMessage>() => {
                     let Some(message) = message? else {
                         bail!("relay closed the connection");
                     };
@@ -1045,10 +1108,10 @@ async fn connected_session(
                                 ClipboardContent::ImagePng { .. } => {
                                     Some(ClipboardItemKind::Image)
                                 }
-                                ClipboardContent::FilesComplete { .. } => {
-                                    Some(ClipboardItemKind::Files)
-                                }
-                                ClipboardContent::FilesStart { .. }
+                                ClipboardContent::FilesComplete { .. } if recipients.is_empty() => Some(ClipboardItemKind::Files),
+                                ClipboardContent::FilesComplete { .. }
+                                | ClipboardContent::FilesReceived { .. }
+                                | ClipboardContent::FilesStart { .. }
                                 | ClipboardContent::FileChunk { .. } => None,
                             };
                             let _ = ui_tx.send(UiEvent::Published {
@@ -1065,7 +1128,7 @@ async fn connected_session(
                             }
                         }
                         ServerMessage::Ping { nonce } => {
-                            write_frame(&mut writer, &ClientMessage::Pong { nonce }).await?;
+                            write_tx.send(ClientMessage::Pong { nonce }).await?;
                         }
                         ServerMessage::Error { code, message } => {
                             bail!("relay error ({code}): {message}");
@@ -1077,6 +1140,7 @@ async fn connected_session(
         }
     }
     .await;
+    writer_task.abort();
     if result.is_err() {
         requeue_outstanding(outstanding, pending);
     }
@@ -1166,8 +1230,7 @@ fn notify_user(summary: &str, body: &str) {
 fn restart_agent(config_path: &std::path::Path) {
     #[cfg(target_os = "macos")]
     // Under the launch agent, KeepAlive restarts us; a Finder launch must respawn itself.
-    let should_spawn =
-        std::env::var("XPC_SERVICE_NAME").as_deref() != Ok(LAUNCH_AGENT_LABEL);
+    let should_spawn = std::env::var("XPC_SERVICE_NAME").as_deref() != Ok(LAUNCH_AGENT_LABEL);
     #[cfg(not(target_os = "macos"))]
     let should_spawn = true;
 
@@ -1202,5 +1265,187 @@ fn quit_agent() {
                 error!(%error, "failed to unload Handclip launch agent");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod transfer_integration_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sends_128_mib_to_a_slow_receiver_without_dropping_chunks() {
+        let root = std::env::temp_dir().join(format!("handclip-large-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("large.bin");
+        let mut file = std::fs::File::create(&source).unwrap();
+        let block: Vec<u8> = (0..file_transfer::CHUNK_BYTES)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        for _ in 0..512 {
+            file.write_all(&block).unwrap();
+        }
+        drop(file);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let relay = tokio::spawn(handclip_relay::serve_listener(
+            listener,
+            "test-token".into(),
+        ));
+        let receiver_stream = connect(&endpoint, "receiver", "test-token").await.unwrap();
+        let sender_stream = connect(&endpoint, "sender", "test-token").await.unwrap();
+        let (sender_tx, mut sender_rx) = channel(NETWORK_COMMAND_CAPACITY);
+        let (receiver_tx, mut receiver_rx) = channel(NETWORK_COMMAND_CAPACITY);
+        let (sender_ui, sender_events) = mpsc::sync_channel(UI_EVENT_CAPACITY);
+        let (receiver_ui, receiver_events) = mpsc::sync_channel(UI_EVENT_CAPACITY);
+        let sender = tokio::spawn(async move {
+            let (read, write) = sender_stream.into_split();
+            connected_session(
+                read,
+                write,
+                "sender",
+                &mut sender_rx,
+                &sender_ui,
+                &mut VecDeque::new(),
+            )
+            .await
+        });
+        let receiver = tokio::spawn(async move {
+            let (read, write) = receiver_stream.into_split();
+            connected_session(
+                read,
+                write,
+                "receiver",
+                &mut receiver_rx,
+                &receiver_ui,
+                &mut VecDeque::new(),
+            )
+            .await
+        });
+        let (receipt_tx, receipt_rx) = mpsc::channel();
+        let feedback = thread::spawn(move || {
+            while let Ok(event) = sender_events.recv() {
+                if let UiEvent::Remote { event, .. } = event
+                    && let ClipboardContent::FilesReceived {
+                        delivery,
+                        item_count,
+                        ..
+                    } = event.content
+                {
+                    receipt_tx
+                        .send((event.origin, delivery, item_count))
+                        .unwrap();
+                }
+            }
+        });
+        let output_root = root.clone();
+        let _keep_receiver_open = receiver_tx.clone();
+        let restore = tokio::task::spawn_blocking(move || {
+            let mut incoming = file_transfer::IncomingTransfers::new(
+                output_root.join("clipboard"),
+                output_root.join("saved"),
+            )
+            .unwrap();
+            loop {
+                let event = receiver_events
+                    .recv_timeout(Duration::from_secs(60))
+                    .unwrap();
+                if let UiEvent::Remote { event, .. } = event {
+                    thread::sleep(Duration::from_millis(5));
+                    if let Some(received) = incoming.handle(&event.origin, event.content).unwrap() {
+                        assert_eq!(received.delivery, FileDelivery::Save);
+                        assert!(received.paths[0].starts_with(output_root.join("saved")));
+                        assert_eq!(
+                            std::fs::read_dir(output_root.join("clipboard"))
+                                .unwrap()
+                                .count(),
+                            0
+                        );
+                        receiver_tx
+                            .blocking_send(NetworkCommand::Publish {
+                                target: DeliveryTarget::device("sender"),
+                                event: ClipboardEvent::new(
+                                    "receiver",
+                                    ClipboardContent::FilesReceived {
+                                        transfer_id: received.transfer_id,
+                                        item_count: received.paths.len(),
+                                        delivery: received.delivery,
+                                    },
+                                ),
+                            })
+                            .unwrap();
+                        return received.paths[0].clone();
+                    }
+                }
+            }
+        });
+        let network = sender_tx.clone();
+        let source_for_send = source.clone();
+        let produce = tokio::task::spawn_blocking(move || {
+            file_transfer::stream_paths(
+                vec![source_for_send],
+                "sender",
+                FileDelivery::Save,
+                |event| {
+                    network
+                        .blocking_send(NetworkCommand::Publish {
+                            target: DeliveryTarget::device("receiver"),
+                            event,
+                        })
+                        .unwrap();
+                    Ok(())
+                },
+            )
+            .unwrap()
+        });
+        let restored = timeout(Duration::from_secs(90), restore)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(produce.await.unwrap().total_bytes, 128 * 1024 * 1024);
+        assert_eq!(
+            std::fs::metadata(&restored).unwrap().len(),
+            128 * 1024 * 1024
+        );
+        assert_eq!(
+            std::fs::read(restored).unwrap(),
+            std::fs::read(source).unwrap()
+        );
+        assert_eq!(
+            receipt_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            ("receiver".into(), FileDelivery::Save, 1)
+        );
+        assert!(!sender.is_finished(), "sender disconnected during transfer");
+        assert!(
+            !receiver.is_finished(),
+            "receiver disconnected during transfer"
+        );
+        sender.abort();
+        receiver.abort();
+        relay.abort();
+        let _ = sender.await;
+        let _ = receiver.await;
+        let _ = relay.await;
+        feedback.join().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn falls_back_from_unreachable_lan_to_the_next_endpoint() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap().to_string();
+        let relay = tokio::spawn(handclip_relay::serve_listener(
+            listener,
+            "test-token".into(),
+        ));
+        let (_, selected) = connect_to_relay(
+            &["127.0.0.1:0".into(), endpoint.clone()],
+            "test",
+            "test-token",
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected, endpoint);
+        relay.abort();
     }
 }

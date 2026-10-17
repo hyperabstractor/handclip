@@ -185,7 +185,7 @@
         <div class="wide">
           <label class="toggle">
             <input id="notifications" type="checkbox">
-            Show notifications when a clipboard is sent or received
+            Show notifications when clipboard content or files are sent or received
           </label>
         </div>
       </div>
@@ -256,6 +256,7 @@
       $("lastActivity").textContent = status.last_activity;
     }
 
+    let savedDownloadDir; // Preserve compatibility with earlier 0.2 settings.
     window.handclipLoad = model => {
       const c = model.config;
       $("device").value = c.device_id;
@@ -267,6 +268,7 @@
         ? "Saved — leave blank to keep it"
         : "Paste the token from another device, or Generate";
       $("received").value = c.receive_dir;
+      savedDownloadDir = c.download_dir;
       $("logs").value = c.log_dir;
       renderTargetShortcuts(c.target_shortcuts);
       $("broadcastShortcut").value = c.broadcast_shortcut;
@@ -321,6 +323,7 @@
             relay_endpoints: relayEndpoints,
             token_file: $("token").value.trim(),
             receive_dir: $("received").value.trim(),
+            download_dir: savedDownloadDir,
             log_dir: $("logs").value.trim(),
             target_shortcuts: targetShortcuts,
             broadcast_shortcut: $("broadcastShortcut").value.trim(),

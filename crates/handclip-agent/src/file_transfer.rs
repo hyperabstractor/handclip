@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use handclip_core::{ClipboardContent, ClipboardEvent, FileEntry, FileEntryKind};
+use handclip_core::{ClipboardContent, ClipboardEvent, FileDelivery, FileEntry, FileEntryKind};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -32,10 +32,11 @@ pub struct TransferSummary {
 pub fn stream_paths(
     selected_paths: Vec<PathBuf>,
     origin: &str,
+    delivery: FileDelivery,
     mut publish: impl FnMut(ClipboardEvent) -> Result<()>,
 ) -> Result<TransferSummary> {
     if selected_paths.is_empty() {
-        bail!("clipboard file list is empty");
+        bail!("file selection is empty");
     }
 
     let mut roots = Vec::with_capacity(selected_paths.len());
@@ -89,6 +90,7 @@ pub fn stream_paths(
         origin,
         ClipboardContent::FilesStart {
             transfer_id,
+            delivery,
             roots,
             entries: outgoing.iter().map(|entry| entry.wire.clone()).collect(),
             total_bytes,
@@ -222,13 +224,21 @@ fn unique_root_name(name: &str, used: &mut HashSet<String>) -> Result<String> {
 }
 
 #[derive(Debug)]
+pub struct ReceivedFiles {
+    pub transfer_id: Uuid,
+    pub paths: Vec<PathBuf>,
+    pub delivery: FileDelivery,
+}
+
 pub struct IncomingTransfers {
     base_dir: PathBuf,
+    download_dir: PathBuf,
     active: HashMap<(String, Uuid), IncomingTransfer>,
 }
 
 #[derive(Debug)]
 struct IncomingTransfer {
+    delivery: FileDelivery,
     partial_dir: PathBuf,
     final_dir: PathBuf,
     roots: Vec<String>,
@@ -237,15 +247,17 @@ struct IncomingTransfer {
 }
 
 impl IncomingTransfers {
-    pub fn new(base_dir: PathBuf) -> Result<Self> {
+    pub fn new(base_dir: PathBuf, download_dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&base_dir).with_context(|| {
             format!(
                 "failed to create file-transfer directory {}",
                 base_dir.display()
             )
         })?;
+        fs::create_dir_all(&download_dir).context("failed to create saved-files directory")?;
         Ok(Self {
             base_dir,
+            download_dir,
             active: HashMap::new(),
         })
     }
@@ -254,15 +266,16 @@ impl IncomingTransfers {
         &mut self,
         origin: &str,
         content: ClipboardContent,
-    ) -> Result<Option<Vec<PathBuf>>> {
+    ) -> Result<Option<ReceivedFiles>> {
         match content {
             ClipboardContent::FilesStart {
                 transfer_id,
+                delivery,
                 roots,
                 entries,
                 total_bytes,
             } => {
-                self.start(origin, transfer_id, roots, entries, total_bytes)?;
+                self.start(origin, transfer_id, delivery, roots, entries, total_bytes)?;
                 Ok(None)
             }
             ClipboardContent::FileChunk {
@@ -286,6 +299,7 @@ impl IncomingTransfers {
         &mut self,
         origin: &str,
         transfer_id: Uuid,
+        delivery: FileDelivery,
         roots: Vec<String>,
         entries: Vec<FileEntry>,
         total_bytes: u64,
@@ -352,8 +366,12 @@ impl IncomingTransfers {
             bail!("file transfer has already started");
         }
         let directory_name = format!("{origin}-{transfer_id}");
-        let partial_dir = self.base_dir.join(format!(".{directory_name}.partial"));
-        let final_dir = self.base_dir.join(directory_name);
+        let base_dir = match delivery {
+            FileDelivery::Clipboard => &self.base_dir,
+            FileDelivery::Save => &self.download_dir,
+        };
+        let partial_dir = base_dir.join(format!(".{directory_name}.partial"));
+        let final_dir = base_dir.join(directory_name);
         if partial_dir.exists() || final_dir.exists() {
             bail!("file transfer staging directory already exists");
         }
@@ -388,6 +406,7 @@ impl IncomingTransfers {
         self.active.insert(
             key,
             IncomingTransfer {
+                delivery,
                 partial_dir,
                 final_dir,
                 roots,
@@ -457,7 +476,7 @@ impl IncomingTransfers {
         origin: &str,
         transfer_id: Uuid,
         hashes: Vec<Option<String>>,
-    ) -> Result<Vec<PathBuf>> {
+    ) -> Result<ReceivedFiles> {
         let key = (origin.to_owned(), transfer_id);
         let transfer = self
             .active
@@ -512,11 +531,15 @@ impl IncomingTransfers {
                 transfer.final_dir.display()
             )
         })?;
-        Ok(transfer
-            .roots
-            .iter()
-            .map(|root| transfer.final_dir.join(root))
-            .collect())
+        Ok(ReceivedFiles {
+            transfer_id,
+            delivery: transfer.delivery,
+            paths: transfer
+                .roots
+                .iter()
+                .map(|root| transfer.final_dir.join(root))
+                .collect(),
+        })
     }
 }
 
@@ -622,7 +645,7 @@ mod tests {
         fs::write(source_root.join("zero.bin"), b"").unwrap();
 
         let mut events = Vec::new();
-        let summary = stream_paths(vec![source_root], "air", |event| {
+        let summary = stream_paths(vec![source_root], "air", FileDelivery::Clipboard, |event| {
             events.push(event);
             Ok(())
         })
@@ -630,7 +653,8 @@ mod tests {
         assert_eq!(summary.total_bytes, 19);
 
         let mut incoming =
-            IncomingTransfers::new(test_root.join("received")).expect("create receiver");
+            IncomingTransfers::new(test_root.join("received"), test_root.join("saved"))
+                .expect("create receiver");
         let mut restored_roots = None;
         for event in events {
             restored_roots = incoming
@@ -638,7 +662,7 @@ mod tests {
                 .unwrap()
                 .or(restored_roots);
         }
-        let restored = restored_roots.unwrap().pop().unwrap();
+        let restored = restored_roots.unwrap().paths.pop().unwrap();
         assert_eq!(
             fs::read(restored.join("hello.txt")).unwrap(),
             b"hello from Handclip"

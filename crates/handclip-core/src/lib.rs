@@ -8,7 +8,9 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u16 = 3;
+// Retain protocol 4 compatibility with deployed 0.2 peers, including their
+// saved-file delivery mode and receiver confirmations.
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const DEFAULT_PORT: u16 = 24_871;
 pub const MAX_FRAME_SIZE: usize = 32 * 1024 * 1024;
 pub const MAX_DEVICE_ID_LEN: usize = 64;
@@ -77,6 +79,7 @@ pub enum ClipboardContent {
     },
     FilesStart {
         transfer_id: Uuid,
+        delivery: FileDelivery,
         roots: Vec<String>,
         entries: Vec<FileEntry>,
         total_bytes: u64,
@@ -92,6 +95,19 @@ pub enum ClipboardContent {
         /// One SHA-256 digest per entry; directories have no digest.
         sha256: Vec<Option<String>>,
     },
+    /// Sent by the receiver only after all bytes have passed integrity checks.
+    FilesReceived {
+        transfer_id: Uuid,
+        item_count: usize,
+        delivery: FileDelivery,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileDelivery {
+    Clipboard,
+    Save,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,29 +231,74 @@ where
     Ok(())
 }
 
+/// Stateful, cancellation-safe framing for use inside `tokio::select!`.
+/// Keep this object for the entire connection; dropping it discards partial data.
+pub struct FrameReader<R> {
+    reader: R,
+    header: [u8; 4],
+    header_read: usize,
+    payload: Vec<u8>,
+    payload_read: usize,
+}
+
+impl<R: AsyncRead + Unpin> FrameReader<R> {
+    pub fn new(reader: R) -> Self {
+        Self {
+            reader,
+            header: [0; 4],
+            header_read: 0,
+            payload: Vec::new(),
+            payload_read: 0,
+        }
+    }
+
+    pub async fn next<T: DeserializeOwned>(&mut self) -> Result<Option<T>, ProtocolError> {
+        while self.header_read < 4 {
+            let count = self
+                .reader
+                .read(&mut self.header[self.header_read..])
+                .await?;
+            if count == 0 {
+                if self.header_read == 0 {
+                    return Ok(None);
+                }
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+            }
+            self.header_read += count;
+        }
+        let length = u32::from_be_bytes(self.header) as usize;
+        if length > MAX_FRAME_SIZE {
+            return Err(ProtocolError::FrameTooLarge {
+                actual: length,
+                maximum: MAX_FRAME_SIZE,
+            });
+        }
+        self.payload.resize(length, 0);
+        while self.payload_read < length {
+            let count = self
+                .reader
+                .read(&mut self.payload[self.payload_read..])
+                .await?;
+            if count == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+            }
+            self.payload_read += count;
+        }
+        let value = serde_json::from_slice(&self.payload)?;
+        self.header_read = 0;
+        self.payload_read = 0;
+        self.payload.clear();
+        Ok(Some(value))
+    }
+}
+
+/// One-shot framing. For reads that can be cancelled and retried, use FrameReader.
 pub async fn read_frame<R, T>(reader: &mut R) -> Result<Option<T>, ProtocolError>
 where
     R: AsyncRead + Unpin,
     T: DeserializeOwned,
 {
-    let mut header = [0_u8; 4];
-    let first_byte_count = reader.read(&mut header[..1]).await?;
-    if first_byte_count == 0 {
-        return Ok(None);
-    }
-
-    reader.read_exact(&mut header[1..]).await?;
-    let payload_len = u32::from_be_bytes(header) as usize;
-    if payload_len > MAX_FRAME_SIZE {
-        return Err(ProtocolError::FrameTooLarge {
-            actual: payload_len,
-            maximum: MAX_FRAME_SIZE,
-        });
-    }
-
-    let mut payload = vec![0_u8; payload_len];
-    reader.read_exact(&mut payload).await?;
-    Ok(Some(serde_json::from_slice(&payload)?))
+    FrameReader::new(reader).next().await
 }
 
 pub fn validate_device_id(device_id: &str) -> bool {
@@ -272,6 +333,37 @@ fn unix_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn resumes_partial_headers_and_payloads_after_cancellation() {
+        use tokio::time::{Duration, timeout};
+        let message = ClientMessage::Ping { nonce: 1234 };
+        let payload = serde_json::to_vec(&message).unwrap();
+        let mut bytes = (payload.len() as u32).to_be_bytes().to_vec();
+        bytes.extend(payload);
+        for split in [1, 3, 4, 5, bytes.len() - 1] {
+            let (mut writer, reader) = tokio::io::duplex(1024);
+            let mut reader = FrameReader::new(reader);
+            writer.write_all(&bytes[..split]).await.unwrap();
+            assert!(
+                timeout(Duration::from_millis(2), reader.next::<ClientMessage>())
+                    .await
+                    .is_err()
+            );
+            writer.write_all(&bytes[split..]).await.unwrap();
+            writer.write_all(&bytes).await.unwrap();
+            assert_eq!(
+                reader.next::<ClientMessage>().await.unwrap(),
+                Some(message.clone())
+            );
+            assert_eq!(
+                reader.next::<ClientMessage>().await.unwrap(),
+                Some(message.clone())
+            );
+            drop(writer);
+            assert_eq!(reader.next::<ClientMessage>().await.unwrap(), None);
+        }
+    }
 
     #[test]
     fn validates_stable_device_ids() {
@@ -309,6 +401,7 @@ mod tests {
             "air",
             ClipboardContent::FilesStart {
                 transfer_id,
+                delivery: FileDelivery::Clipboard,
                 roots: vec!["report.pdf".into()],
                 entries: vec![FileEntry {
                     relative_path: "report.pdf".into(),

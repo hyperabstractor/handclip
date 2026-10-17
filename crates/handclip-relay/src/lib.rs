@@ -15,14 +15,14 @@ use handclip_core::{
 };
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::{Mutex, broadcast},
+    sync::{Mutex, mpsc},
     time::timeout,
 };
 use tracing::{info, warn};
 use uuid::Uuid;
 
-// 256 KiB file chunks keep this bounded ring at roughly 64 MiB plus framing overhead.
-const EVENT_CHANNEL_CAPACITY: usize = 256;
+// Slow receivers exert backpressure instead of losing file chunks in a broadcast ring.
+const CONNECTION_QUEUE_CAPACITY: usize = 8;
 const RECENT_EVENT_CAPACITY: usize = 4096;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -30,16 +30,9 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 struct RelayState {
     auth_token: String,
     next_sequence: AtomicU64,
-    events: broadcast::Sender<RoutedEvent>,
+    connections: Mutex<HashMap<Uuid, (String, mpsc::Sender<ServerMessage>)>>,
     recent_events: Mutex<RecentEvents>,
     connected_devices: Mutex<HashMap<String, usize>>,
-}
-
-#[derive(Clone, Debug)]
-struct RoutedEvent {
-    sequence: u64,
-    event: handclip_core::ClipboardEvent,
-    recipients: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -77,11 +70,16 @@ pub async fn serve(listen: SocketAddr, auth_token: String) -> Result<()> {
     let listener = TcpListener::bind(listen)
         .await
         .with_context(|| format!("failed to listen on {listen}"))?;
-    let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+    serve_listener(listener, auth_token).await
+}
+
+/// Serve an already-bound listener, including an ephemeral port in integration tests.
+pub async fn serve_listener(listener: TcpListener, auth_token: String) -> Result<()> {
+    let listen = listener.local_addr()?;
     let state = Arc::new(RelayState {
         auth_token,
         next_sequence: AtomicU64::new(1),
-        events,
+        connections: Mutex::new(HashMap::new()),
         recent_events: Mutex::new(RecentEvents::default()),
         connected_devices: Mutex::new(HashMap::new()),
     });
@@ -172,79 +170,60 @@ async fn handle_connection(
     )
     .await?;
 
-    let mut event_rx = state.events.subscribe();
+    let (outgoing, mut outgoing_rx) = mpsc::channel(CONNECTION_QUEUE_CAPACITY);
+    let connection_id = Uuid::new_v4();
+    state
+        .connections
+        .lock()
+        .await
+        .insert(connection_id, (device_id.clone(), outgoing.clone()));
     register_device(&state, &device_id).await;
     info!(%peer, %device_id, "device connected");
 
+    // Drain writes independently: a slow send must not cancel a partial read,
+    // or prevent the peer's outgoing traffic from being read.
+    let mut writer_task = tokio::spawn(async move {
+        while let Some(message) = outgoing_rx.recv().await {
+            write_frame(&mut writer, &message).await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
     let result = async {
         loop {
             tokio::select! {
-                message = read_frame::<_, ClientMessage>(&mut reader) => {
-                    let Some(message) = message? else {
-                        info!(%peer, %device_id, "device disconnected");
-                        break Ok(());
-                    };
-                    handle_client_message(&device_id, message, &state, &mut writer).await?;
+                result = &mut writer_task => {
+                    return result.context("relay writer stopped")?;
                 }
-                routed = event_rx.recv() => {
-                    match routed {
-                        Ok(routed) => {
-                            if routed.recipients.iter().any(|recipient| recipient == &device_id) {
-                                write_frame(
-                                    &mut writer,
-                                    &ServerMessage::Event {
-                                        sequence: routed.sequence,
-                                        event: routed.event,
-                                    },
-                                )
-                                .await?;
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            write_frame(
-                                &mut writer,
-                                &ServerMessage::Error {
-                                    code: "event_lag".into(),
-                                    message: format!("client missed {skipped} events"),
-                                },
-                            )
-                            .await?;
-                            bail!("client lagged by {skipped} events");
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            bail!("relay event channel closed");
-                        }
-                    }
+                message = read_frame::<_, ClientMessage>(&mut reader) => {
+                    let Some(message) = message? else { return Ok(()); };
+                    handle_client_message(&device_id, message, &state, &outgoing).await?;
                 }
             }
         }
     }
     .await;
+    writer_task.abort();
+    state.connections.lock().await.remove(&connection_id);
 
     unregister_device(&state, &device_id).await;
     result
 }
 
-async fn handle_client_message<W>(
+async fn handle_client_message(
     device_id: &str,
     message: ClientMessage,
     state: &RelayState,
-    writer: &mut W,
-) -> Result<()>
-where
-    W: tokio::io::AsyncWrite + Unpin,
-{
+    writer: &mpsc::Sender<ServerMessage>,
+) -> Result<()> {
     match message {
         ClientMessage::Publish { target, event } => {
             if event.origin != device_id {
-                write_frame(
-                    writer,
-                    &ServerMessage::Error {
+                writer
+                    .send(ServerMessage::Error {
                         code: "origin".into(),
                         message: "event origin must match the authenticated device".into(),
-                    },
-                )
-                .await?;
+                    })
+                    .await?;
                 bail!("event origin does not match device ID");
             }
             if let DeliveryTarget::Device {
@@ -252,14 +231,12 @@ where
             } = &target
                 && !validate_device_id(target_device)
             {
-                write_frame(
-                    writer,
-                    &ServerMessage::Error {
+                writer
+                    .send(ServerMessage::Error {
                         code: "target".into(),
                         message: "target device ID contains unsupported characters".into(),
-                    },
-                )
-                .await?;
+                    })
+                    .await?;
                 bail!("invalid target device ID");
             }
 
@@ -287,46 +264,56 @@ where
                 }
             };
             let Some((publication, is_new)) = publication_result else {
-                write_frame(
-                    writer,
-                    &ServerMessage::Error {
+                writer
+                    .send(ServerMessage::Error {
                         code: "duplicate_target".into(),
                         message: "an event ID cannot be republished to a different target".into(),
-                    },
-                )
-                .await?;
+                    })
+                    .await?;
                 bail!("duplicate event ID used with a different target");
             };
             if is_new {
-                let _receiver_count = state.events.send(RoutedEvent {
-                    sequence: publication.sequence,
-                    event: event.clone(),
-                    recipients: publication.recipients.clone(),
-                });
+                let connections = state
+                    .connections
+                    .lock()
+                    .await
+                    .values()
+                    .filter(|(id, _)| publication.recipients.contains(id))
+                    .map(|(_, tx)| tx.clone())
+                    .collect::<Vec<_>>();
+                for connection in connections {
+                    // A dead recipient must not hang a sender indefinitely.
+                    timeout(
+                        Duration::from_secs(60),
+                        connection.send(ServerMessage::Event {
+                            sequence: publication.sequence,
+                            event: event.clone(),
+                        }),
+                    )
+                    .await
+                    .context("receiver stopped accepting data")?
+                    .context("receiver disconnected during transfer")?;
+                }
             }
-            write_frame(
-                writer,
-                &ServerMessage::Published {
+            writer
+                .send(ServerMessage::Published {
                     event_id: event.id,
                     sequence: publication.sequence,
                     recipients: publication.recipients,
-                },
-            )
-            .await?;
+                })
+                .await?;
         }
         ClientMessage::Ping { nonce } => {
-            write_frame(writer, &ServerMessage::Pong { nonce }).await?;
+            writer.send(ServerMessage::Pong { nonce }).await?;
         }
         ClientMessage::Pong { .. } => {}
         ClientMessage::Hello { .. } => {
-            write_frame(
-                writer,
-                &ServerMessage::Error {
+            writer
+                .send(ServerMessage::Error {
                     code: "handshake".into(),
                     message: "hello may only be sent once".into(),
-                },
-            )
-            .await?;
+                })
+                .await?;
             bail!("client sent a second hello");
         }
     }

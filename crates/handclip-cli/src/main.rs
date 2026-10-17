@@ -225,11 +225,22 @@ fn print_event(sequence: u64, event: &ClipboardEvent, json: bool) -> Result<()> 
                 png_base64.len()
             );
         }
+        ClipboardContent::FilesReceived {
+            transfer_id,
+            item_count,
+            ..
+        } => {
+            println!(
+                "[{sequence}] {}: verified transfer {transfer_id} ({item_count} items)",
+                event.origin
+            );
+        }
         ClipboardContent::FilesStart {
             transfer_id,
             roots,
             entries,
             total_bytes,
+            ..
         } => {
             println!(
                 "[{sequence}] {}: file transfer {transfer_id} started ({} roots, {} entries, {} bytes)",

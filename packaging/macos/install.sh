@@ -40,9 +40,16 @@ rm -rf "$apps/Connet.app"
 mkdir -p "$data/logs" "$data/bin" "$agents" "$apps"
 
 launchctl bootout "gui/$uid/$label" 2>/dev/null || true
+# Retire the Share extension shipped in 0.2.0, including its menu registration.
+pluginkit -e ignore -i io.github.handclip.share 2>/dev/null || true
+if [ -d "$app/Contents/PlugIns/HandclipShare.appex" ]; then
+    pluginkit -r "$app/Contents/PlugIns/HandclipShare.appex" 2>/dev/null || true
+fi
 rm -rf "$app"
 ditto "$here/Handclip.app" "$app"
 xattr -dr com.apple.quarantine "$app" 2>/dev/null || true
+# Refresh the enclosing app registration after replacing it.
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app"
 
 cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

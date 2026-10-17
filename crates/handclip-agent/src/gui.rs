@@ -62,7 +62,7 @@ pub enum GuiAction {
 #[serde(tag = "action", rename_all = "snake_case")]
 enum IpcMessage {
     Save {
-        config: AppConfig,
+        config: Box<AppConfig>,
         #[serde(default)]
         token: String,
     },
@@ -174,7 +174,10 @@ impl DesktopUi {
         while let Ok(message) = self.ipc_rx.try_recv() {
             match serde_json::from_str::<IpcMessage>(&message) {
                 Ok(IpcMessage::Save { config, token }) => {
-                    actions.push(GuiAction::Save { config, token });
+                    actions.push(GuiAction::Save {
+                        config: *config,
+                        token,
+                    });
                 }
                 Ok(IpcMessage::CloseSettings) => actions.push(GuiAction::CloseSettings),
                 Err(error) => tracing::warn!(%error, "ignored invalid settings message"),
@@ -263,7 +266,8 @@ impl DesktopUi {
 
     pub fn set_setup_required(&mut self) {
         self.status.summary = "Setup required".into();
-        self.status_item.set_text("● Setup required — open Settings");
+        self.status_item
+            .set_text("● Setup required — open Settings");
         let _ = self.tray.set_tooltip(Some("Handclip — Setup required"));
         self.sync_runtime_status();
     }

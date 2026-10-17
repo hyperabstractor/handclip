@@ -1309,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "handclip-agent"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "handclip-cli"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "handclip-core"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1357,7 +1357,7 @@ dependencies = [
 
 [[package]]
 name = "handclip-relay"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",

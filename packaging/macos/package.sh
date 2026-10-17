@@ -50,7 +50,8 @@ cat > "$app/Contents/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
-codesign --force --sign - "$app"
+codesign --force --sign "${HANDCLIP_SIGN_IDENTITY:--}" "$app"
+codesign --verify --deep --strict "$app"
 
 cp "$bin/handclip-cli" "$here/install.sh" "$dist/"
 ditto -c -k --norsrc --noextattr --keepParent "$dist" "$repo/target/dist/Handclip-macos.zip"
